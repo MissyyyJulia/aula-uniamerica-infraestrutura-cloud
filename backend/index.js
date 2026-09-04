@@ -2,22 +2,44 @@ const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const bodyParser = require('body-parser');
+const serverless = require('serverless-http'); // <-- NOVA IMPORTAÇÃO
 
 // Inicializando o app Express
 const app = express();
-const port = 5000;
-
-// Conexão com o MongoDB (com autenticação)
-mongoose.connect('mongodb://root:rootpassword@mongo-todo:27017/todo-app?authSource=admin', {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-})
-  .then(() => console.log('Conectado ao MongoDB'))
-  .catch((err) => console.error('Erro ao conectar ao MongoDB:', err));
 
 // Middleware para habilitar CORS e processar JSON
 app.use(cors());
 app.use(bodyParser.json());
+
+// Conexão com o MongoDB usando Variável de Ambiente
+// O AWS Lambda vai injetar a variável MONGO_URI com o endereço real do banco
+const mongoURI = process.env.MONGO_URI;
+
+// Evita conectar várias vezes se o Lambda reutilizar a instância (Warm Start)
+let isConnected;
+
+const connectToDatabase = async () => {
+  if (isConnected) {
+    console.log('Usando conexão existente com o MongoDB');
+    return;
+  }
+  try {
+    const db = await mongoose.connect(mongoURI, {
+      useNewUrlParser: true,
+      useUnifiedTopology: true,
+    });
+    isConnected = db.connections[0].readyState;
+    console.log('Novo banco conectado!');
+  } catch (err) {
+    console.error('Erro ao conectar ao MongoDB:', err);
+  }
+};
+
+// Middleware para garantir que o banco está conectado antes de qualquer rota
+app.use(async (req, res, next) => {
+  await connectToDatabase();
+  next();
+});
 
 // Definindo o modelo de Tarefa (To-do)
 const TodoSchema = new mongoose.Schema({
@@ -30,7 +52,7 @@ const Todo = mongoose.model('Todo', TodoSchema);
 // Rota para obter todas as tarefas (GET)
 app.get('/todos', async (req, res) => {
   try {
-    const todos = await Todo.find(); // Retorna todas as tarefas do banco
+    const todos = await Todo.find();
     res.json(todos);
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -39,39 +61,34 @@ app.get('/todos', async (req, res) => {
 
 // Rota para adicionar uma nova tarefa (POST)
 app.post('/todos', async (req, res) => {
-  const { text } = req.body; // Obtém o texto da tarefa do corpo da requisição
+  const { text } = req.body;
 
-  // Verifica se o campo "text" está presente
   if (!text) {
     return res.status(400).json({ message: 'O campo "text" é obrigatório' });
   }
 
-  const todo = new Todo({
-    text,
-    completed: false,
-  });
+  const todo = new Todo({ text, completed: false });
 
   try {
-    const newTodo = await todo.save(); // Salva a tarefa no banco
-    res.status(201).json(newTodo); // Retorna a tarefa criada
+    const newTodo = await todo.save();
+    res.status(201).json(newTodo);
   } catch (err) {
-    res.status(400).json({ message: err.message }); // Retorna erro se houver falha no banco de dados
+    res.status(400).json({ message: err.message });
   }
 });
 
 // Rota para marcar uma tarefa como concluída (PATCH)
 app.patch('/todos/:id', async (req, res) => {
   try {
-    const todo = await Todo.findById(req.params.id); // Encontra a tarefa pelo ID
+    const todo = await Todo.findById(req.params.id);
 
     if (!todo) {
       return res.status(404).json({ message: 'Tarefa não encontrada' });
     }
 
-    // Alterna o status de "completed" da tarefa
     todo.completed = !todo.completed;
-    await todo.save(); // Salva a tarefa modificada
-    res.json(todo); // Retorna a tarefa atualizada
+    await todo.save();
+    res.json(todo);
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -80,19 +97,17 @@ app.patch('/todos/:id', async (req, res) => {
 // Rota para excluir uma tarefa (DELETE)
 app.delete('/todos/:id', async (req, res) => {
   try {
-    const todo = await Todo.findByIdAndDelete(req.params.id); // Deleta a tarefa pelo ID
+    const todo = await Todo.findByIdAndDelete(req.params.id);
 
     if (!todo) {
       return res.status(404).json({ message: 'Tarefa não encontrada' });
     }
 
-    res.json({ message: 'Tarefa excluída com sucesso' }); // Retorna uma mensagem de sucesso
+    res.json({ message: 'Tarefa excluída com sucesso' });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
 });
 
-// Iniciando o servidor na porta 5000
-app.listen(port, () => {
-  console.log(`Servidor rodando na porta ${port}`);
-});
+// REMOVEMOS O app.listen(port) E ADICIONAMOS A EXPORTAÇÃO PARA O LAMBDA:
+module.exports.handler = serverless(app);
